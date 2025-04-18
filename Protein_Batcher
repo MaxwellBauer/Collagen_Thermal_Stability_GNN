@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""
+Script to convert collagen sequences with hydroxyproline (O) to AlphaFold Server JSON format
+"""
+
+import pandas as pd
+import json
+import math
+import os
+from typing import Dict, List, Tuple, Any
+
+
+def convert_sequence_with_ptm(sequence: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """Replace O with P and track locations for CCD_HYP modifications"""
+    # Remove BOM character if present
+    sequence = sequence.replace('\ufeff', '')
+    
+    # Store PTM modifications
+    modifications = []
+    
+    # Replace 'O' with 'P' and track positions
+    new_sequence = ""
+    for i, char in enumerate(sequence):
+        if char == 'O':
+            new_sequence += 'P'
+            # 1-indexed in AlphaFold
+            modifications.append({
+                "ptmType": "CCD_HYP",
+                "ptmPosition": i + 1
+            })
+        else:
+            new_sequence += char
+            
+    return new_sequence, modifications
+
+
+def create_batch_files(csv_path: str, output_dir: str = None) -> None:
+    """Process CSV with collagen sequences and create JSON batch files"""
+    # Load data
+    df = pd.read_csv(csv_path)
+    print(f"Loaded {len(df)} sequences from {csv_path}")
+    
+    # Create output dir
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    else:
+        output_dir = "."
+    
+    # Batch sizes
+    first_batch_size = 10  # Small verification batch
+    regular_batch_size = 100  # Regular batch size
+    
+    # Calculate batches
+    remaining_proteins = len(df) - first_batch_size
+    remaining_batches = math.ceil(remaining_proteins / regular_batch_size)
+    total_batches = 1 + remaining_batches
+    
+    # Create verification batch
+    verification_batch = create_verification_batch(df, first_batch_size)
+    
+    # Save verification batch
+    verification_path = os.path.join(output_dir, "collagen_batch_1_verification.json")
+    with open(verification_path, 'w') as f:
+        json.dump(verification_batch, f, indent=2)
+    print(f"Created verification batch with {first_batch_size} proteins: {verification_path}")
+    
+    # Create remaining batches
+    for batch_num in range(remaining_batches):
+        start_idx = first_batch_size + (batch_num * regular_batch_size)
+        end_idx = min(first_batch_size + ((batch_num + 1) * regular_batch_size), len(df))
+        
+        # Get sequences for this batch
+        batch_sequences = []
+        for i, (_, row) in enumerate(df.iloc[start_idx:end_idx].iterrows()):
+            seq_idx = start_idx + i + 1
+            new_sequence, modifications = convert_sequence_with_ptm(row['Sequences'])
+            
+            sequence_data = {
+                "proteinChain": {
+                    "sequence": new_sequence,
+                    "count": 1
+                }
+            }
+            
+            if modifications:
+                sequence_data["proteinChain"]["modifications"] = modifications
+                
+            batch_sequences.append(sequence_data)
+        
+        # Create batch object
+        batch = [
+            {
+                "name": f"Collagen_Batch_{batch_num+2}",
+                "modelSeeds": [],
+                "sequences": batch_sequences,
+                "dialect": "alphafoldserver",
+                "version": 1
+            }
+        ]
+        
+        # Save batch
+        batch_path = os.path.join(output_dir, f"collagen_batch_{batch_num+2}.json")
+        with open(batch_path, 'w') as f:
+            json.dump(batch, f, indent=2)
+        
+        print(f"Created batch {batch_num+2} with {len(batch_sequences)} proteins")
+    
+    print(f"Successfully created {total_batches} batch files")
+
+
+def create_verification_batch(df: pd.DataFrame, batch_size: int) -> List[Dict[str, Any]]:
+    """Create small test batch with first few sequences"""
+    # Get sequences for verification batch
+    verification_sequences = []
+    for i in range(batch_size):
+        if i >= len(df):
+            break
+            
+        row = df.iloc[i]
+        new_sequence, modifications = convert_sequence_with_ptm(row['Sequences'])
+        
+        sequence_data = {
+            "proteinChain": {
+                "sequence": new_sequence,
+                "count": 1
+            }
+        }
+        
+        if modifications:
+            sequence_data["proteinChain"]["modifications"] = modifications
+            
+        verification_sequences.append(sequence_data)
+    
+    # Create verification batch
+    verification_batch = [
+        {
+            "name": "Collagen_Batch_1_Verification",
+            "modelSeeds": [],
+            "sequences": verification_sequences,
+            "dialect": "alphafoldserver",
+            "version": 1
+        }
+    ]
+    
+    return verification_batch
+
+
+def main():
+    """Process args and run script"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Process collagen sequences for AlphaFold Server"
+    )
+    parser.add_argument(
+        "csv_path",
+        help="Path to CSV file containing collagen sequences"
+    )
+    parser.add_argument(
+        "--output-dir", "-o",
+        help="Directory to save JSON batch files",
+        default=None
+    )
+    
+    args = parser.parse_args()
+    create_batch_files(args.csv_path, args.output_dir)
+
+
+if __name__ == "__main__":
+    main()
